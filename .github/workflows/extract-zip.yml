@@ -1,0 +1,204 @@
+name: Extract Project ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Find Project ZIP
+        id: zip
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found in repository root."
+            exit 1
+          fi
+
+          echo "Found ZIP: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE="${{ steps.zip.outputs.ZIP_FILE }}"
+
+          rm -rf _extracted
+          mkdir -p _extracted
+
+          echo "Extracting $ZIP_FILE..."
+
+          unzip -q "$ZIP_FILE" -d _extracted
+
+          echo ""
+          echo "=== EXTRACTED CONTENT ==="
+          find _extracted -maxdepth 3 -type f | sort
+
+      - name: Detect project root
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f "_extracted/package.json" ]; then
+            PROJECT_ROOT="_extracted"
+          else
+            PACKAGE_JSON=$(find _extracted \
+              -mindepth 1 \
+              -maxdepth 3 \
+              -type f \
+              -name "package.json" \
+              | head -n 1)
+
+            if [ -z "$PACKAGE_JSON" ]; then
+              echo "ERROR: package.json was not found inside the ZIP."
+              exit 1
+            fi
+
+            PROJECT_ROOT=$(dirname "$PACKAGE_JSON")
+          fi
+
+          echo "Project root detected: $PROJECT_ROOT"
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Replace repository with project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_ROOT="${{ steps.project.outputs.PROJECT_ROOT }}"
+          ZIP_FILE="${{ steps.zip.outputs.ZIP_FILE }}"
+
+          echo "Cleaning old project..."
+
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name ".git" \
+            ! -name ".github" \
+            ! -name "_extracted" \
+            ! -name "$(basename "$ZIP_FILE")" \
+            -exec rm -rf {} +
+
+          echo "Copying FAA'S Closet project..."
+
+          cp -a "$PROJECT_ROOT"/. .
+
+          rm -rf _extracted
+          rm -f "$ZIP_FILE"
+
+      - name: Create gitignore
+        shell: bash
+        run: |
+          cat > .gitignore <<'EOF'
+          node_modules/
+          dist/
+          .DS_Store
+          *.log
+          EOF
+
+      - name: Verify project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== ROOT ==="
+          ls -la
+
+          echo ""
+          echo "=== REQUIRED FILES ==="
+
+          test -f package.json
+          test -f index.html
+          test -f vite.config.js
+          test -d src
+          test -f src/main.jsx
+          test -f src/styles.css
+
+          echo "package.json ........ OK"
+          echo "index.html .......... OK"
+          echo "vite.config.js ...... OK"
+          echo "src/ ................ OK"
+          echo "src/main.jsx ........ OK"
+          echo "src/styles.css ...... OK"
+
+          echo ""
+          echo "=== ASSETS ==="
+
+          if [ -d "public" ]; then
+            find public -maxdepth 3 -type f | sort
+          fi
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+          npm install
+
+      - name: Build project
+        shell: bash
+        run: |
+          set -e
+          npm run build
+
+      - name: Remove generated files
+        shell: bash
+        run: |
+          rm -rf node_modules
+          rm -rf dist
+
+      - name: Commit project
+        shell: bash
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          echo "=== STAGING PROJECT ==="
+
+          git add -A
+
+          # Do not include this workflow in the commit.
+          git reset -- .github/workflows/extract-zip.yml || true
+
+          echo ""
+          echo "=== FILES TO COMMIT ==="
+          git diff --cached --name-only
+
+          echo ""
+          echo "=== CHECKING FOR NODE_MODULES ==="
+
+          if git diff --cached --name-only | grep -q "^node_modules/"; then
+            echo "ERROR: node_modules was staged."
+            exit 1
+          fi
+
+          echo "node_modules not staged."
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Deploy FAA'S Closet website"
+
+          echo ""
+          echo "=== PUSHING WEBSITE ==="
+
+          git push origin HEAD:main
